@@ -56,6 +56,7 @@
               <div class="text-cyan-400 font-bold">牛顿环</div>
               <div>暗环半径: r = √(nλR)</div>
               <div>R: 曲率半径</div>
+              <div class="text-yellow-400 mt-1">r₁ = {{ store.result.firstRingRadius?.toFixed(4) }} mm</div>
             </div>
           </div>
         </div>
@@ -75,23 +76,131 @@
         </div>
       </div>
     </div>
+
+    <!-- 批量回归检查 -->
+    <div class="px-4 pb-4">
+      <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
+        <div class="flex items-center justify-between flex-wrap gap-2 mb-3">
+          <h3 class="text-sm font-bold text-slate-400">批量回归检查</h3>
+          <div class="text-xs text-slate-500">
+            <span v-if="store.baselineMeta">基线: {{ store.baselineMeta.groupCount }} 组 · {{ formatTime(store.baselineMeta.createdAt) }}</span>
+            <span v-else>暂无基线（首次成功运行将自动建立）</span>
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mb-2">每行一组参数：<span class="font-mono text-slate-400">波长nm, 缝宽μm, 缝间距μm, 屏幕距离mm</span>。逐组核对三类实验结果与适用条件；无参数、重复组合或超出边界时拒绝运行且不覆盖既有基线。</p>
+        <textarea v-model="batchInput" rows="4" spellcheck="false"
+          class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs font-mono text-slate-300 focus:border-cyan-500 outline-none"
+          placeholder="550, 50, 200, 1000"></textarea>
+        <div class="flex items-center gap-2 mt-2 flex-wrap">
+          <button @click="runRegression(false)"
+            class="px-3 py-1.5 rounded text-xs font-bold bg-cyan-600 hover:bg-cyan-500 text-white transition-colors">运行批量回归</button>
+          <button @click="runRegression(true)"
+            class="px-3 py-1.5 rounded text-xs font-bold bg-emerald-700 hover:bg-emerald-600 text-white transition-colors">运行并设为基线</button>
+          <button @click="store.clearBaseline()"
+            class="px-3 py-1.5 rounded text-xs font-bold bg-slate-700 hover:bg-slate-600 text-slate-300 transition-colors">清除基线</button>
+        </div>
+
+        <div v-if="parseError || store.batchRejection" class="mt-3 bg-red-900/30 border border-red-700 rounded p-3 text-xs text-red-300">
+          <div class="font-bold mb-1">已拒绝运行，既有基线保持不变</div>
+          <div>{{ parseError || store.batchRejection?.message }}</div>
+          <ul v-if="store.batchRejection?.reason === 'out-of-bounds'" class="mt-1 space-y-0.5 list-disc list-inside text-red-400">
+            <li v-for="v in store.batchRejection.violations" :key="v.index">第 {{ v.index + 1 }} 组: {{ v.errors.join('；') }}</li>
+          </ul>
+        </div>
+
+        <div v-if="store.batchReport" class="mt-3">
+          <div class="text-xs mb-2" :class="store.batchReport.failedIndices.length ? 'text-red-400' : 'text-green-400'">
+            共 {{ store.batchReport.groups.length }} 组，
+            <template v-if="store.batchReport.failedIndices.length">
+              失败 {{ store.batchReport.failedIndices.length }} 组：第 {{ store.batchReport.failedIndices.map(i => i + 1).join('、') }} 组
+            </template>
+            <template v-else>全部通过</template>
+            <span v-if="!store.batchReport.comparedAgainstBaseline" class="text-slate-500">（无基线可比对，本次结果已作为基准）</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-slate-500 border-b border-slate-700">
+                  <th class="text-left py-1 pr-2">#</th>
+                  <th class="text-left py-1 pr-2">参数 (λ/a/d/L)</th>
+                  <th class="text-left py-1 pr-2">双缝干涉</th>
+                  <th class="text-left py-1 pr-2">单缝衍射</th>
+                  <th class="text-left py-1 pr-2">牛顿环</th>
+                  <th class="text-left py-1">状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="g in store.batchReport.groups" :key="g.index"
+                  :class="['border-b border-slate-700/50', g.status === 'fail' ? 'bg-red-900/20' : '']">
+                  <td class="py-1.5 pr-2 text-slate-500">{{ g.index + 1 }}</td>
+                  <td class="py-1.5 pr-2 font-mono text-slate-400">
+                    {{ g.params.wavelength }}/{{ g.params.slitWidth }}/{{ g.params.slitSeparation }}/{{ g.params.screenDistance }}
+                  </td>
+                  <td v-for="exp in experiments" :key="exp.id" class="py-1.5 pr-2">
+                    <div :class="g.experiments[exp.id].status === 'fail' ? 'text-red-400' : 'text-slate-300'">
+                      {{ formatScalar(exp.id, g.experiments[exp.id].result) }}
+                      <span v-if="g.experiments[exp.id].status === 'fail'" :title="g.experiments[exp.id].diffs.join('\n')" class="cursor-help">✗</span>
+                      <span v-else class="text-green-500">✓</span>
+                    </div>
+                    <div v-for="(w, wi) in g.experiments[exp.id].warnings" :key="wi" class="text-yellow-500 text-[10px]">⚠ {{ w }}</div>
+                    <div v-if="g.experiments[exp.id].status === 'fail'" class="text-red-500 text-[10px]">
+                      {{ g.experiments[exp.id].diffs[0] }}
+                    </div>
+                  </td>
+                  <td class="py-1.5" :class="g.status === 'fail' ? 'text-red-400 font-bold' : 'text-green-500'">
+                    {{ g.status === 'fail' ? '失败' : '通过' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { useOpticsStore } from './store/optics'
+import { ExperimentId, ScalarResult } from './lib/physics'
+import { parseBatchInput } from './lib/batch'
 
 const store = useOpticsStore()
 const patternRef = ref<HTMLCanvasElement | null>(null)
 const intensityRef = ref<HTMLCanvasElement | null>(null)
 const heatmapRef = ref<HTMLCanvasElement | null>(null)
 
-const experiments = [
+const experiments: { id: ExperimentId; name: string }[] = [
   { id: 'double', name: '双缝干涉 (Young实验)' },
   { id: 'single', name: '单缝衍射 (Fraunhofer)' },
   { id: 'newton', name: '牛顿环干涉' },
 ]
+
+// ---- 批量回归检查 ----
+const batchInput = ref('550, 50, 200, 1000\n600, 100, 300, 1500')
+const parseError = ref('')
+
+function runRegression(updateBaseline: boolean) {
+  const { groups, badLines } = parseBatchInput(batchInput.value)
+  if (badLines.length > 0) {
+    parseError.value = `第 ${badLines.join('、')} 行格式错误（应为 4 个数字：波长,缝宽,缝间距,屏幕距离）`
+    return
+  }
+  parseError.value = ''
+  store.runBatchRegression(groups, { updateBaseline })
+}
+
+function formatScalar(exp: ExperimentId, r: ScalarResult): string {
+  if (exp === 'double') return `Δy=${r.fringe?.toFixed(2)}mm`
+  if (exp === 'single') return `中央宽=${r.centralWidth?.toFixed(2)}mm`
+  return `r₁=${r.firstRingRadius?.toFixed(4)}mm`
+}
+
+function formatTime(iso: string): string {
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString()
+}
 
 function wavelengthToRGB(nm: number): [number, number, number] {
   let r = 0, g = 0, b = 0
