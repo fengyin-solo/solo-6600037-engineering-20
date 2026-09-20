@@ -73,6 +73,88 @@
           <h3 class="text-sm font-bold text-slate-400 mb-3">2D 热力图</h3>
           <canvas ref="heatmapRef" class="w-full rounded" style="height: 200px; background: black;"></canvas>
         </div>
+        <div class="bg-slate-800 rounded-lg p-4 border border-slate-700">
+          <div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+            <h3 class="text-sm font-bold text-slate-400">批量回归检查</h3>
+            <div class="flex items-center gap-3 text-xs">
+              <span v-if="store.consistencyOk === true" class="text-green-400">单项↔批量一致 ✓</span>
+              <span v-else-if="store.consistencyOk === false" class="text-red-400">单项↔批量不一致 ✗</span>
+              <span v-if="store.baseline" class="text-slate-500">
+                基线：{{ store.baseline.cases.length }} 组 · {{ new Date(store.baseline.savedAt).toLocaleString() }}
+              </span>
+              <span v-else class="text-yellow-500">基线：未建立</span>
+            </div>
+          </div>
+          <textarea v-model="store.batchInput" rows="5" spellcheck="false"
+            class="w-full bg-slate-900 border border-slate-700 rounded p-2 text-xs text-slate-300 font-mono focus:border-cyan-500 focus:outline-none"
+            placeholder="每行一组：波长nm, 缝宽μm, 缝间距μm, 屏幕距离mm"></textarea>
+          <div class="flex flex-wrap gap-2 mt-2">
+            <button @click="store.runBatchCheck()"
+              class="px-3 py-1.5 rounded bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition-colors">
+              {{ store.batchReport ? '重试批量检查' : '运行批量检查' }}
+            </button>
+            <button @click="store.saveAsBaseline()"
+              class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs transition-colors">
+              保存为基线
+            </button>
+            <button v-if="store.baseline" @click="store.clearBaseline()"
+              class="px-3 py-1.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-400 text-xs transition-colors">
+              清除基线
+            </button>
+          </div>
+          <div v-if="store.baselineMessage" class="mt-2 text-xs text-green-400">{{ store.baselineMessage }}</div>
+          <div v-if="store.batchErrors.length" class="mt-2 bg-red-900/30 border border-red-800 rounded p-2 space-y-1">
+            <div v-for="(e, i) in store.batchErrors" :key="i" class="text-xs text-red-400">✗ {{ e }}（既有基线未被覆盖）</div>
+          </div>
+          <div v-if="store.batchReport" class="mt-3">
+            <div class="flex flex-wrap gap-3 text-xs mb-2">
+              <span class="text-slate-400">共 {{ store.batchReport.total }} 组</span>
+              <span class="text-green-400">通过 {{ store.batchReport.passed }}</span>
+              <span :class="store.batchReport.failed ? 'text-red-400' : 'text-slate-500'">失败 {{ store.batchReport.failed }}</span>
+              <span v-if="store.batchReport.comparedToBaseline" :class="store.batchReport.regressionCount ? 'text-red-400' : 'text-slate-500'">
+                回归差异 {{ store.batchReport.regressionCount }} 组
+              </span>
+              <span v-if="store.batchReport.comparedToBaseline && store.batchReport.newCases" class="text-yellow-500">
+                新增组合 {{ store.batchReport.newCases }} 组（基线外）
+              </span>
+              <span v-else-if="!store.batchReport.comparedToBaseline" class="text-slate-500">未与基线对比</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-xs">
+                <thead>
+                  <tr class="text-slate-500 border-b border-slate-700">
+                    <th class="text-left py-1 pr-2">#</th>
+                    <th class="text-left py-1 pr-2">参数组合</th>
+                    <th class="text-center py-1 px-2">双缝</th>
+                    <th class="text-center py-1 px-2">单缝</th>
+                    <th class="text-center py-1 px-2">牛顿环</th>
+                    <th class="text-left py-1 pl-2">结论 / 失败原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in store.batchReport.cases" :key="c.key"
+                    :class="['border-b border-slate-700/50 align-top', c.status === 'fail' ? 'bg-red-900/20' : '']">
+                    <td class="py-1.5 pr-2 text-slate-500">{{ c.index + 1 }}</td>
+                    <td class="py-1.5 pr-2 font-mono text-slate-300 whitespace-nowrap">
+                      λ={{ c.params.wavelength }} a={{ c.params.slitWidth }} d={{ c.params.slitSeparation }} L={{ c.params.screenDistance }}
+                    </td>
+                    <td v-for="exp in experimentIds" :key="exp" class="py-1.5 px-2 text-center">
+                      <span v-if="c.boundsErrors.length" class="text-slate-600">—</span>
+                      <span v-else-if="checkOf(c, exp)?.ok" class="text-green-400">✓</span>
+                      <span v-else class="text-red-400">✗</span>
+                    </td>
+                    <td class="py-1.5 pl-2">
+                      <span v-if="c.status === 'pass'" class="text-green-400">通过</span>
+                      <ul v-else class="space-y-0.5">
+                        <li v-for="(r, i) in c.failureReasons" :key="i" class="text-red-400">{{ r }}</li>
+                      </ul>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -81,17 +163,25 @@
 <script setup lang="ts">
 import { ref, onMounted, watch } from 'vue'
 import { useOpticsStore } from './store/optics'
+import { EXPERIMENT_IDS, type ExperimentId } from './physics/optics'
+import type { CaseReport } from './physics/regression'
 
 const store = useOpticsStore()
 const patternRef = ref<HTMLCanvasElement | null>(null)
 const intensityRef = ref<HTMLCanvasElement | null>(null)
 const heatmapRef = ref<HTMLCanvasElement | null>(null)
 
-const experiments = [
+const experimentIds = EXPERIMENT_IDS
+
+const experiments: Array<{ id: ExperimentId; name: string }> = [
   { id: 'double', name: '双缝干涉 (Young实验)' },
   { id: 'single', name: '单缝衍射 (Fraunhofer)' },
   { id: 'newton', name: '牛顿环干涉' },
 ]
+
+function checkOf(c: CaseReport, exp: ExperimentId) {
+  return c.checks.find(ch => ch.experiment === exp)
+}
 
 function wavelengthToRGB(nm: number): [number, number, number] {
   let r = 0, g = 0, b = 0
